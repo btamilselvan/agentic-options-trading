@@ -14,7 +14,6 @@ from fastapi import FastAPI
 from trading_app.api.routers import api_router
 from trading_app.config import get_settings
 from trading_app.correlation import CorrelationIdMiddleware
-from trading_app.db.base import init_models
 from trading_app.logging_config import configure_logging
 from trading_app.workers.manager import WorkerManager
 
@@ -25,7 +24,9 @@ worker_manager = WorkerManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_models()
+    # Schema is Alembic-managed (see migrations/), not created by the app
+    # at runtime — run `alembic upgrade head` before starting this process
+    # (the Docker entrypoint does this automatically).
     worker_manager.start()
     try:
         yield

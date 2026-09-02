@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-Phase 0 (foundation) is scaffolded: a FastAPI skeleton, typed shared contracts, config/secrets scaffolding, an async DB layer, and a placeholder background-worker loop per component. No screener, indicator, LLM, risk, or broker logic is implemented yet — see the phased plan below for what's still ahead.
+Phase 0 (foundation) is scaffolded: a FastAPI skeleton, typed shared contracts, config/secrets scaffolding, an Alembic-managed async DB layer, a pluggable LLM insight-provider layer (Gemini/Ollama), and a placeholder background-worker loop per component. No screener, indicator, risk, or broker logic is implemented yet — see the phased plan below for what's still ahead.
 
 Treat `requirements.md` as the authoritative spec. Any implementation work in this repo should conform to it; if a requested change conflicts with it, flag the conflict rather than silently diverging.
 
@@ -14,17 +14,21 @@ Managed with [uv](https://docs.astral.sh/uv/); everything runs through `uv run` 
 
 ```bash
 uv sync --extra dev                 # install/update deps (reads pyproject.toml + uv.lock)
+uv run alembic upgrade head          # apply pending DB migrations (do this before first run)
 uv run uvicorn trading_app.main:app --reload   # run the dev server (docs at /docs)
 uv run pytest                       # run the test suite
 uv run pytest tests/test_health.py::test_liveness   # run a single test
 uv run ruff check .                 # lint
 uv run ruff check . --fix           # lint, auto-fixing what's safe
 uv run mypy src                     # type-check
+docker build -t agentic-options-trading .   # build the production image
 ```
 
 Source lives under `src/trading_app` (src-layout, installed editable); tests under `tests/`, using `pytest-asyncio` (`asyncio_mode = "auto"`) and an `httpx.AsyncClient` against the app via `ASGITransport` — see `tests/conftest.py`.
 
-**Gotcha:** `get_settings()` is a process-wide `lru_cache` singleton, and the live-mode endpoint mutates it in place (see below). Tests that touch it must call `get_settings.cache_clear()` before building the app, or state leaks across test files run in the same process — the `client` fixture in `conftest.py` already does this.
+**Gotchas:**
+- `get_settings()` is a process-wide `lru_cache` singleton, and the live-mode endpoint mutates it in place (see below). Tests that touch it must call `get_settings.cache_clear()` before building the app, or state leaks across test files run in the same process — the `client` fixture in `conftest.py` already does this.
+- The dev/prod database is normally a **real remote Postgres (Supabase)**, not the SQLite default. `tests/conftest.py` pins `DATABASE__URL` to an isolated local SQLite file *before* `trading_app.config` is imported anywhere in the test process, specifically so tests can never run against that real database. Don't remove or reorder that — anything that imports `trading_app.config`/`trading_app.main` before that line runs would read whatever `DATABASE__URL` a developer's real `.env` has.
 
 ## What this system is
 
@@ -63,14 +67,23 @@ A correlation ID must be threaded from candidate → snapshot → event → LLM 
 
 ## Code layout (`src/trading_app/`)
 
-- `main.py` — FastAPI app factory; `lifespan` calls `db.base.init_models()` then starts `workers.manager.WorkerManager` so request handlers never touch background work directly.
-- `config.py` — `Settings` (env-backed via `pydantic-settings`, nested delimiter `__`), `ExecutionMode`, `SafetySettings` (live disabled by default).
+- `main.py` — FastAPI app factory; `lifespan` starts `workers.manager.WorkerManager` only. Schema is Alembic-managed, not created here — see Database below.
+- `config.py` — `Settings` (env-backed via `pydantic-settings`, nested delimiter `__`), `ExecutionMode`, `SafetySettings` (live disabled by default), `LLMSettings` (provider/model/timeout/retries — never a hardcoded provider).
 - `schemas/` — one module per contract family from §5 (`common.py` has the shared `VersionedModel` base every contract inherits: schema version, correlation ID, UTC timestamp).
-- `api/routers/` — one module per required API group from §9 (`health`, `configuration`, `candidates`, `features`, `insights`, `trade_intents`, `orders`, `paper`, `approval`, `audit`), aggregated in `api/routers/__init__.py`. Most bodies are still `TODO(Phase N)` stubs returning empty lists — `audit.py` is the one router already reading real state (SQLite via `db/base.py`).
+- `api/routers/` — one module per required API group from §9 (`health`, `configuration`, `candidates`, `features`, `insights`, `trade_intents`, `orders`, `paper`, `approval`, `audit`), aggregated in `api/routers/__init__.py`. Most bodies are still `TODO(Phase N)` stubs returning empty lists — `audit.py` is the one router already reading real DB state.
+- `services/insights/` — `InsightProvider` Protocol (`base.py`), `GeminiInsightProvider`/`OllamaInsightProvider` (plain REST calls, no provider SDK), and `factory.get_insight_provider(settings)` — the only place a provider name maps to a class. Add a provider by implementing the Protocol and registering it in `factory.py`; never branch on provider name elsewhere.
 - `workers/manager.py` — a placeholder asyncio loop per background component named in §9 (`collection`, `indicators`, `event_detection`, `llm_evaluation`, `paper_fills`, `reconciliation`, `notifications`); swap for a durable task queue before Phase 1 relies on real scheduling.
-- `security/secrets.py` — `SecretsProvider` abstraction; only an env-var-backed dev implementation exists so far.
+- `security/secrets.py` — `SecretsProvider` abstraction; only an env-var-backed dev implementation exists so far. Secrets (e.g. `GEMINI_API_KEY`) are plain top-level env vars resolved through this, never nested under a settings group.
+- `db/base.py` — async engine/session; `init_models()` (`create_all`) is a **test-only** convenience, never called by the running app.
+- `migrations/` — Alembic environment (`env.py` sources the DB URL/metadata from `trading_app.config`/`trading_app.db` — no separate URL to keep in sync) and versioned migrations under `migrations/versions/`.
 
 When implementing a spec component, extend the matching module above rather than introducing a parallel structure.
+
+## Database
+
+Schema is entirely Alembic-managed (`uv run alembic upgrade head` / `revision --autogenerate`); the app never runs `create_all` at startup — see `docker-entrypoint.sh` for how production applies migrations automatically before starting the server. Any SQLAlchemy-async URL works (Postgres/Supabase via `postgresql+asyncpg://...` in normal dev/prod use, SQLite via `sqlite+aiosqlite:///...` as a zero-dependency fallback and for tests) — don't add Supabase-specific code paths; it's used as plain Postgres.
+
+**Every table this app owns — including Alembic's own version table — is prefixed `ot_`** (e.g. `ot_audit_records`, `ot_alembic_version`; set via `VERSION_TABLE` in `migrations/env.py`), so the database can be shared safely with other projects. Apply this prefix to every new ORM model's `__tablename__`.
 
 ## Shared data contracts (requirements.md §5)
 
@@ -82,7 +95,7 @@ Work is expected to land in this order; don't jump ahead of validated capabiliti
 
 0. Validate Schwab/Robinhood capabilities; scaffold contracts, FastAPI skeleton, config, secrets, DB schema, audit log, paper-sim shell. *No implementation may depend on an unverified broker behavior.*
 1. Read-only quant pipeline: screener + Schwab-backed OHLCV/benchmarks + features + state detection + activity log. No LLM, no orders yet.
-2. LLM advisory insights (`InsightProvider`, Gemini Flash, schema validation, Telegram approval workflow). No order can result from LLM output alone.
+2. LLM advisory insights — the `InsightProvider` interface, Gemini/Ollama implementations, and provider factory already exist (`services/insights/`); still needed: wiring evaluation into the state-detection event flow, schema-validation/audit persistence, and the Telegram approval workflow. No order can result from LLM output alone.
 3. Deterministic risk layer + internal paper-trading simulator + historical replay.
 4. Verified live broker adapters, reconciliation, kill switch, constrained live sizing.
 5. Hardening: threshold tuning from replay, streaming, dashboards, fallbacks.

@@ -1,0 +1,13 @@
+# Convenience for running the containerized app locally against whatever
+# DATABASE__URL / LLM__* / secrets your .env points at (e.g. Supabase +
+# Gemini). Not a full production orchestration — inject env vars via your
+# hosting platform's secrets mechanism in real production rather than a
+# committed .env.
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: unless-stopped

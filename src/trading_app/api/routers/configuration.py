@@ -30,6 +30,19 @@ class LiveModeChangeResponse(BaseModel):
     live_trading_enabled: bool
 
 
+class LLMConfigResponse(BaseModel):
+    provider: str
+    model_name: str
+
+
+@router.get("/llm", response_model=LLMConfigResponse)
+async def get_llm_config(settings: Settings = Depends(get_settings)) -> LLMConfigResponse:
+    """Read-only visibility into the active LLM provider/model — set via
+    `LLM__PROVIDER` / `LLM__MODEL_NAME`, never hardcoded (requirements.md
+    section 4.4)."""
+    return LLMConfigResponse(provider=settings.llm.provider, model_name=settings.llm.model_name)
+
+
 @router.get("/safety", response_model=SafetyConfigResponse)
 async def get_safety_config(settings: Settings = Depends(get_settings)) -> SafetyConfigResponse:
     return SafetyConfigResponse(

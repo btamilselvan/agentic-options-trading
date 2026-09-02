@@ -12,7 +12,9 @@ from trading_app.schemas.common import utcnow
 
 
 class AuditRecord(Base):
-    __tablename__ = "audit_records"
+    # All application tables are prefixed "ot_" (see CLAUDE.md) so this
+    # database can be safely shared with other projects.
+    __tablename__ = "ot_audit_records"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     correlation_id: Mapped[str] = mapped_column(String(36), index=True)

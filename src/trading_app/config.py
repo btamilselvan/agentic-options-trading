@@ -23,6 +23,15 @@ class ExecutionMode(StrEnum):
 
 
 class DatabaseSettings(BaseModel):
+    """Any SQLAlchemy-async-compatible URL works here — Supabase (or any
+    other Postgres) via `postgresql+asyncpg://...`, or SQLite via
+    `sqlite+aiosqlite:///...` for a zero-dependency local fallback. Schema
+    is managed by Alembic (see migrations/), not by this application at
+    runtime — run `alembic upgrade head` before starting the app. All
+    tables use the `ot_` prefix so this database can be shared safely with
+    other projects (requirements.md's storage guidance doesn't mandate a
+    specific engine; Supabase is just Postgres underneath)."""
+
     url: str = "sqlite+aiosqlite:///./trading_app.db"
     echo: bool = False
 
@@ -35,11 +44,21 @@ class TelegramSettings(BaseModel):
 
 class LLMSettings(BaseModel):
     """Provider-neutral LLM configuration. Application code must depend on
-    the `InsightProvider` interface, never on a concrete provider/model name
-    (requirements.md section 4.4)."""
+    the `InsightProvider` interface (trading_app.services.insights), never
+    on a concrete provider/model name (requirements.md section 4.4).
 
-    provider: str = "gemini_flash"
-    model_name: str = "gemini-flash"
+    Switch providers with `LLM__PROVIDER` alone — no code change required:
+
+    - `LLM__PROVIDER=gemini`, `LLM__MODEL_NAME=gemini-2.5-flash` (verify the
+      model name against the currently available Gemini API models); needs
+      a `GEMINI_API_KEY` resolved via `trading_app.security.secrets`.
+    - `LLM__PROVIDER=ollama`, `LLM__MODEL_NAME=<model you've pulled locally>`
+      (e.g. `llama3.1`); talks to `LLM__OLLAMA_BASE_URL`, no API key needed.
+    """
+
+    provider: str = "gemini"
+    model_name: str = "gemini-2.5-flash"
+    ollama_base_url: str = "http://localhost:11434"
     timeout_seconds: float = 15.0
     max_retries: int = 2
     daily_spend_limit_usd: float = 5.0

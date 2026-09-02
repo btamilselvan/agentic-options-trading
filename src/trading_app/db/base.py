@@ -1,7 +1,9 @@
 """Async SQLAlchemy engine/session setup.
 
-Uses `Base.metadata.create_all` at startup for now. Introduce Alembic once
-the schema grows past the audit trail (requirements.md section 7).
+Real schema evolution is owned by Alembic (see migrations/) — `init_models`
+below is `Base.metadata.create_all`, kept only as a fast, migration-free
+way to stand up a throwaway schema for tests. The application itself never
+calls it; run `alembic upgrade head` before starting the app.
 """
 from __future__ import annotations
 
@@ -37,7 +39,8 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 async def init_models() -> None:
-    """Create tables if they do not exist."""
+    """Create tables if they do not exist. Test-only convenience — see the
+    module docstring."""
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
