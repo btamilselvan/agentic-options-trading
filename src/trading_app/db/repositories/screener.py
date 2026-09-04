@@ -21,6 +21,14 @@ async def save_screen_result(session: AsyncSession, result: ScreenResult) -> Non
             market_data_provider=result.market_data_provider,
         )
     )
+    # ScreenerRunRecord/CandidateSymbolRecord have no ORM relationship()
+    # between them (just a raw FK column), so the unit-of-work has no
+    # dependency processor to order their inserts automatically — flush
+    # the parent row explicitly before adding children that reference it,
+    # or a strict-FK backend (Postgres) can insert them out of order.
+    # SQLite doesn't enforce FK constraints by default, which is exactly
+    # why this went unnoticed until a real Postgres database hit it.
+    await session.flush()
     for candidate in result.candidates:
         session.add(
             CandidateSymbolRecord(

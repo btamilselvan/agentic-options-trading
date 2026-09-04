@@ -168,7 +168,7 @@ class ScreenerSettings(BaseModel):
     weight_options_bonus: float = 0.5
 
     max_candidates: int = 20
-    refresh_interval_seconds: int = 120
+    refresh_interval_seconds: int = 1200
     market_hours_only: bool = True
 
 
