@@ -4,10 +4,11 @@ Personal intraday agentic options-trading decision-support application. The
 full specification lives in [`requirements.md`](requirements.md); this
 README covers only how to run what's currently implemented.
 
-**Status:** Phase 0 (foundation) — FastAPI skeleton, typed shared contracts,
-config/secrets scaffolding, an Alembic-managed async DB layer, a pluggable
-LLM insight-provider layer, and a placeholder background-worker scaffold.
-No screener, indicator, risk, or broker logic yet.
+**Status:** Phase 1 underway — the screener (component 1) is implemented;
+FastAPI skeleton, typed shared contracts, config/secrets scaffolding, an
+Alembic-managed async DB layer, and a pluggable LLM insight-provider layer
+are all in place from Phase 0. No quantitative-features engine, state
+detection, risk, or broker logic yet.
 
 ## Local development
 
@@ -50,6 +51,19 @@ never need a manual step in production. Inject `DATABASE__URL`,
 `GEMINI_API_KEY`, and any other secrets via your hosting platform's secrets
 mechanism, not a committed `.env`; `docker-compose.yml` uses `env_file: .env`
 purely as a local convenience for testing the container image itself.
+
+The image defaults `ENVIRONMENT=production` (override with
+`-e ENVIRONMENT=development` if you need dev-mode behavior in a
+container). This gates, independent of any trading behavior:
+
+- interactive `/docs` and `/redoc` UI — disabled in production (the raw
+  `/openapi.json` schema stays available in every environment, per
+  requirements.md section 1)
+- log format — JSON lines in production, plain-text in development
+- FastAPI debug tracebacks and uvicorn autoreload — development only
+
+`ENVIRONMENT=development` is `Settings`' own default, so plain `uv run
+uvicorn ...` locally gets dev-mode behavior with no `.env` changes needed.
 
 Live trading is disabled by default in every environment
 (`SAFETY__LIVE_TRADING_ENABLED=false`) and can only be changed through the
@@ -99,6 +113,106 @@ active. Add a third provider by implementing `InsightProvider` under
 `services/insights/` and registering it in `services/insights/factory.py`
 — no other call site changes.
 
+## Screener
+
+The screener (requirements.md section 4.1) refreshes a bounded, ranked
+watchlist of candidate symbols from deterministic filters — price, RVOL
+proxy, percent move, spread, options availability — with every threshold
+and ranking weight configurable via `ScreenerSettings`, never a code
+constant. It runs automatically as a background loop (`workers.screener_worker`)
+on `SCREENER__REFRESH_INTERVAL_SECONDS` (default 120s) during regular
+market hours only (`SCREENER__MARKET_HOURS_ONLY=true`; a simple Mon-Fri
+09:30-16:00 America/New_York check — full exchange-calendar handling for
+holidays/early closes is a later refinement), and persists every run for
+audit/backtesting.
+
+```bash
+GET  /api/v1/candidates             # latest run's ranked candidates
+GET  /api/v1/candidates?run_id=...  # a specific historical run
+GET  /api/v1/candidates/runs        # recent run metadata (audit/backtesting)
+POST /api/v1/candidates/run         # force an immediate run (testing/ops)
+```
+
+Like the LLM layer, raw market data is fetched through a provider-neutral
+`MarketDataProvider` interface (`trading_app.services.market_data`),
+selected by `MARKET_DATA__PROVIDER`:
+
+- `static` — a deterministic, synthetic dev fixture. Not real market data.
+- `schwab` — the real Schwab Trader API (requirements.md sections 1, 4.2),
+  via [schwab-py](https://schwab-py.readthedocs.io/). Field mapping is
+  verified against a real, authenticated `/marketdata/v1/quotes` response
+  (see `tests/test_schwab_client.py`), and `reference.optionable` gives
+  options availability directly — no separate option-chain call needed.
+
+Key `.env` knobs:
+
+```bash
+MARKET_DATA__PROVIDER=static
+SCREENER__UNIVERSE=["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AMD","SPY","QQQ"]
+SCREENER__MAX_CANDIDATES=20
+SCREENER__REFRESH_INTERVAL_SECONDS=120
+```
+
+### Universe: static list vs. dynamic discovery
+
+Which symbols even get screened is itself pluggable — a separate
+`UniverseProvider` interface (`trading_app.services.universe`), selected
+by `UNIVERSE__PROVIDER`:
+
+- `static` (default) — screens exactly `SCREENER__UNIVERSE`, unchanged.
+- `schwab_movers` — dynamically discovers symbols every cycle from
+  Schwab's real top-gainers/top-losers/most-active data
+  (`GET /marketdata/v1/movers/{index}`; verified against a real response —
+  see `tests/test_schwab_movers.py`). Each call returns only the top 10
+  for one index/sort-order combination, so this combines every configured
+  pair and dedupes to cover more of the market:
+
+```bash
+MARKET_DATA__PROVIDER=schwab
+UNIVERSE__PROVIDER=schwab_movers
+UNIVERSE__SCHWAB_MOVERS_INDICES=["equity_all"]
+UNIVERSE__SCHWAB_MOVERS_SORT_ORDERS=["percent_change_up","percent_change_down","volume"]
+UNIVERSE__MAX_DYNAMIC_SYMBOLS=60
+UNIVERSE__ALWAYS_INCLUDE=["SPY","QQQ"]   # screened every cycle regardless of what's discovered
+```
+
+`ScreenerSettings.exclusions` still applies on top of whatever's
+discovered — it's a universal blocklist, not tied to either provider.
+
+### Using the Schwab provider
+
+1. Register an app at [developer.schwab.com](https://developer.schwab.com)
+   requesting Trader API access (approval typically takes 1-3 business
+   days). Its callback URL must be HTTPS and match exactly what you set
+   below.
+2. Add to `.env`:
+   ```bash
+   MARKET_DATA__PROVIDER=schwab
+   SCHWAB_CLIENT_ID=<your app key>
+   SCHWAB_CLIENT_SECRET=<your app secret>
+   SCHWAB_CALLBACK_URL=https://127.0.0.1:8182   # must match your app's registered callback
+   SCHWAB_TOKEN_PATH=.secrets/schwab_token.json  # gitignored; never commit this file
+   ```
+3. One-time interactive browser consent — opens a browser, then writes the
+   token to `SCHWAB_TOKEN_PATH`:
+   ```bash
+   uv run scripts/bootstrap_schwab_oauth.py
+   ```
+4. Schwab's refresh token lasts ~7 days; run this periodically (e.g. a
+   daily cron) to keep the on-disk token from ever going stale — no
+   browser needed:
+   ```bash
+   uv run scripts/refresh_schwab_token.py
+   ```
+   Once the refresh token itself expires, only step 3's interactive flow
+   gets a new one — this script fails clearly when that's the case.
+
+Quotes carry a freshness check (`MARKET_DATA__MAX_QUOTE_AGE_SECONDS`,
+default 900s/15min): outside market hours Schwab returns the last
+regular-session quote with its original timestamp, which this correctly
+marks `STALE` and filters out — that's the fail-closed data-freshness
+policy (requirements.md section 8) working as intended, not a bug.
+
 ## Test
 
 ```bash
@@ -131,12 +245,17 @@ src/trading_app/
   schemas/         Shared Pydantic contracts (requirements.md section 5)
   api/routers/     One module per required API group (requirements.md section 9)
   db/              Async SQLAlchemy engine/session (Postgres/Supabase or SQLite)
-  models/          ORM models, all tables prefixed `ot_` (audit trail so far)
-  services/insights/  Pluggable InsightProvider (Gemini / Ollama) + factory
-  workers/         Background worker scaffold — one placeholder loop per
-                   component (collection, indicators, event detection, LLM
-                   evaluation, paper fills, reconciliation, notifications)
+  db/repositories/ Persistence functions, one module per aggregate (screener so far)
+  models/          ORM models, all tables prefixed `ot_` (audit + screener so far)
+  services/insights/     Pluggable InsightProvider (Gemini / Ollama) + factory
+  services/market_data/  Pluggable MarketDataProvider (static fixture / real Schwab) + factory
+  services/screener/     Filters, scoring, market-hours gate, and the run_screen entry point
+  services/universe/     Pluggable UniverseProvider (static list / dynamic Schwab movers) + factory
+  workers/         Background workers — `screener` runs real logic; the rest
+                   (collection, indicators, event detection, LLM evaluation,
+                   paper fills, reconciliation, notifications) are still placeholders
   security/        Secret-resolution abstraction (env-backed by default)
 migrations/        Alembic environment + versioned migrations
+scripts/           One-off/periodic ops scripts (Schwab OAuth bootstrap + refresh)
 tests/             pytest + httpx async-client tests
 ```

@@ -12,12 +12,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from trading_app.api.routers import api_router
-from trading_app.config import get_settings
+from trading_app.config import Environment, get_settings
 from trading_app.correlation import CorrelationIdMiddleware
 from trading_app.logging_config import configure_logging
 from trading_app.workers.manager import WorkerManager
 
-configure_logging()
+_settings = get_settings()
+configure_logging(level="DEBUG", json_format=_settings.environment != Environment.DEVELOPMENT)
 
 worker_manager = WorkerManager()
 
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    is_production = settings.environment == Environment.PRODUCTION
     app = FastAPI(
         title=settings.app_name,
         description=(
@@ -46,6 +48,12 @@ def create_app() -> FastAPI:
         ),
         version="0.1.0",
         lifespan=lifespan,
+        # The raw OpenAPI schema stays available in every environment
+        # (requirements.md section 1 requires it); only the interactive
+        # docs UI pages are dev/staging-only.
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
+        debug=not is_production,
     )
     app.add_middleware(CorrelationIdMiddleware)
     app.include_router(api_router, prefix=settings.api_prefix)
@@ -59,7 +67,12 @@ def run() -> None:
     """Entrypoint for the `trading-app` console script."""
     import uvicorn
 
-    uvicorn.run("trading_app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "trading_app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=_settings.environment == Environment.DEVELOPMENT,
+    )
 
 
 if __name__ == "__main__":

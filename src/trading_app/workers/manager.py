@@ -3,8 +3,9 @@
 Request handlers must never block on market-data loops, LLM calls, or
 broker reconciliation (requirements.md section 9). This manager starts each
 background loop as an asyncio task under the FastAPI lifespan and cancels
-them cleanly on shutdown. Each loop body is a placeholder until its owning
-component (Phase 1-4) is implemented; swap in a durable task queue (per
+them cleanly on shutdown. `screener` runs real logic (requirements.md
+section 4.1); the rest are placeholders until their owning component
+(Phase 1-4) is implemented. Swap in a durable task queue (per
 requirements.md sections 7, 9) before relying on this for real scheduling
 guarantees.
 """
@@ -12,10 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable, Coroutine
+from typing import Any
+
+from trading_app.workers.screener_worker import run_screener_loop
 
 logger = logging.getLogger(__name__)
 
-WORKER_NAMES = (
+# Named in requirements.md section 9, plus "screener" (section 4.1's own
+# configurable refresh cadence, which needs a loop just as much as these).
+PLACEHOLDER_WORKER_NAMES = (
     "collection",
     "indicators",
     "event_detection",
@@ -32,13 +39,27 @@ async def _placeholder_loop(name: str, interval_seconds: float = 60.0) -> None:
         await asyncio.sleep(interval_seconds)
 
 
+def _make_placeholder(name: str) -> Callable[[], Coroutine[Any, Any, None]]:
+    async def _loop() -> None:
+        await _placeholder_loop(name)
+
+    return _loop
+
+
+def _build_worker_loops() -> dict[str, Callable[[], Coroutine[Any, Any, None]]]:
+    loops: dict[str, Callable[[], Coroutine[Any, Any, None]]] = {"screener": run_screener_loop}
+    for name in PLACEHOLDER_WORKER_NAMES:
+        loops[name] = _make_placeholder(name)
+    return loops
+
+
 class WorkerManager:
     def __init__(self) -> None:
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: list[asyncio.Task[None]] = []
 
     def start(self) -> None:
-        for name in WORKER_NAMES:
-            task = asyncio.create_task(_placeholder_loop(name), name=f"worker:{name}")
+        for name, loop_factory in _build_worker_loops().items():
+            task = asyncio.create_task(loop_factory(), name=f"worker:{name}")
             self._tasks.append(task)
         logger.info("started %d background workers", len(self._tasks))
 
