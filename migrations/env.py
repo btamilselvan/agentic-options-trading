@@ -20,7 +20,7 @@ from trading_app.db.base import Base
 # Import every ORM model module so it registers on Base.metadata before
 # autogenerate compares against it. Add new model modules here as they're
 # created.
-from trading_app.models import audit, screener  # noqa: F401
+from trading_app.models import audit, features, screener  # noqa: F401
 
 config = context.config
 

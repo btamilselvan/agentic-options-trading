@@ -213,6 +213,51 @@ regular-session quote with its original timestamp, which this correctly
 marks `STALE` and filters out — that's the fail-closed data-freshness
 policy (requirements.md section 8) working as intended, not a bug.
 
+## Quantitative engine
+
+The data collection & quantitative engine (requirements.md section 4.2)
+is the canonical, versioned source of technical/volume/volatility/
+market-context features — no other component computes its own
+indicators. Each cycle it reads the current screener candidates, fetches
+their OHLCV bar history via `MarketDataProvider.get_candles` (the same
+provider interface the screener uses, extended with a second method),
+and persists a `FeatureSnapshot` per symbol:
+
+```bash
+GET  /api/v1/features/snapshots             # latest snapshot per symbol
+GET  /api/v1/features/snapshots?symbol=...  # history for one symbol
+POST /api/v1/features/compute               # force an immediate run (testing/ops)
+```
+
+Computed per symbol: session VWAP, EMA(9/20/50) + slopes + alignment,
+RSI, ROC, ATR + ATR%, canonical time-of-day-aligned RVOL (distinct from
+and more correct than the screener's cheap proxy), volume acceleration,
+rolling average volume, previous-day/premarket/opening-range/session
+levels, and market context (SPY/QQQ trend, mapped sector-ETF trend,
+relative move vs each benchmark). Every definition is versioned
+(`feature_definition_version`) and unit-tested against hand-checked
+fixtures (`tests/test_quant_*.py`) per requirements.md section 13 — bump
+the version string in `QuantEngineSettings` whenever a definition
+changes (session boundary, lookback window, period, etc.).
+
+Options features (IV/Greeks/OI) are explicitly out of scope for this
+pass — deferred to Phase 2 per requirements.md's own phased plan.
+
+Key `.env` knobs (`QUANT_ENGINE__*`): `PRIMARY_INTERVAL` (which timeframe
+EMA/RSI/ATR compute on — VWAP/levels/RVOL always use 1-minute bars),
+`EMA_PERIODS`, `RSI_PERIOD`/`ROC_PERIOD`/`ATR_PERIOD`,
+`RVOL_LOOKBACK_DAYS` (bounds the minute-history payload size),
+`OPENING_RANGE_MINUTES`, `SECTOR_ETF_MAP` (e.g. `{"AAPL":"XLK"}` — best-
+effort, `null` sector trend when unmapped), `BENCHMARK_SYMBOLS`,
+`REFRESH_INTERVAL_SECONDS`.
+
+**Gotcha already hit once:** Schwab's daily-bar endpoint includes
+*today's* still-open bar, whose `close` is just today's live price, not
+a closed value — `SchwabMarketDataProvider.get_candles` explicitly
+filters it out for `Interval.DAILY`. Without that filter, "previous day
+close" silently becomes "today's current price," breaking every level
+and relative-move calculation that depends on it.
+
 ## Test
 
 ```bash
@@ -245,15 +290,18 @@ src/trading_app/
   schemas/         Shared Pydantic contracts (requirements.md section 5)
   api/routers/     One module per required API group (requirements.md section 9)
   db/              Async SQLAlchemy engine/session (Postgres/Supabase or SQLite)
-  db/repositories/ Persistence functions, one module per aggregate (screener so far)
-  models/          ORM models, all tables prefixed `ot_` (audit + screener so far)
+  db/repositories/ Persistence functions, one module per aggregate (screener, features)
+  models/          ORM models, all tables prefixed `ot_` (audit, screener, features)
   services/insights/     Pluggable InsightProvider (Gemini / Ollama) + factory
-  services/market_data/  Pluggable MarketDataProvider (static fixture / real Schwab) + factory
+  services/market_data/  Pluggable MarketDataProvider (static fixture / real Schwab) + factory —
+                         both current quotes (get_market_snapshots) and OHLCV bar history (get_candles)
   services/screener/     Filters, scoring, market-hours gate, and the run_screen entry point
   services/universe/     Pluggable UniverseProvider (static list / dynamic Schwab movers) + factory
-  workers/         Background workers — `screener` runs real logic; the rest
-                   (collection, indicators, event detection, LLM evaluation,
-                   paper fills, reconciliation, notifications) are still placeholders
+  services/quant/        Indicator functions (vwap/ema/rsi/atr/volume/levels/market_context)
+                         + engine.py (FeatureSnapshot assembly) + service.py (provider I/O orchestration)
+  workers/         Background workers — `screener` and `indicators` run real logic; the rest
+                   (collection, event detection, LLM evaluation, paper fills,
+                   reconciliation, notifications) are still placeholders
   security/        Secret-resolution abstraction (env-backed by default)
 migrations/        Alembic environment + versioned migrations
 scripts/           One-off/periodic ops scripts (Schwab OAuth bootstrap + refresh)

@@ -12,7 +12,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from trading_app.schemas.market_data import DataFreshness
+from trading_app.schemas.market_data import Candle, DataFreshness, Interval
 
 
 class MarketSnapshot(BaseModel):
@@ -41,3 +41,17 @@ class MarketDataProviderError(Exception):
 
 class MarketDataProvider(Protocol):
     async def get_market_snapshots(self, symbols: list[str]) -> list[MarketSnapshot]: ...
+
+    async def get_candles(
+        self,
+        symbol: str,
+        interval: Interval,
+        *,
+        lookback_days: int,
+        include_extended_hours: bool = False,
+    ) -> list[Candle]:
+        """OHLCV bar history for the quantitative engine (requirements.md
+        section 4.2) — distinct from `get_market_snapshots`'s single
+        current-state view. `lookback_days` is trading days, not calendar
+        days. Bars are returned oldest-first."""
+        ...

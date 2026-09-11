@@ -172,6 +172,38 @@ class ScreenerSettings(BaseModel):
     market_hours_only: bool = True
 
 
+class QuantEngineSettings(BaseModel):
+    """Data collection & quantitative engine (requirements.md section 4.2)
+    — the canonical source of quantitative analysis. Every definition
+    below (session boundary, lookback, period) is configuration and must
+    be versioned; bump `feature_definition_version` whenever one changes
+    so historical FeatureSnapshots stay interpretable."""
+
+    # Which intraday timeframe EMA/RSI/ATR compute on. VWAP/levels/RVOL
+    # always use 1-minute bars regardless of this setting.
+    primary_interval: str = "5m"
+    ema_periods: list[int] = Field(default_factory=lambda: [9, 20, 50])
+    rsi_period: int = 14
+    roc_period: int = 10
+    atr_period: int = 14
+    volume_acceleration_window: int = 5
+    # How many trading days of 1-minute history to fetch — covers both
+    # today's session (VWAP/levels) and the historical baseline RVOL's
+    # time-of-day comparison needs.
+    rvol_lookback_days: int = 10
+    opening_range_minutes: int = 15
+    daily_lookback_days: int = 30
+    # Underlying symbol -> sector ETF, e.g. {"AAPL": "XLK"}. Empty/best-
+    # effort by default — an unmapped symbol just gets a null sector
+    # trend, never a fabricated one.
+    sector_etf_map: dict[str, str] = Field(default_factory=dict)
+    benchmark_symbols: list[str] = Field(default_factory=lambda: ["SPY", "QQQ"])
+    include_extended_hours: bool = True
+    refresh_interval_seconds: int = 300
+    market_hours_only: bool = True
+    feature_definition_version: str = "1.0"
+
+
 class Settings(BaseSettings):
     """Root application settings, assembled from environment variables."""
 
@@ -205,6 +237,7 @@ class Settings(BaseSettings):
     market_data: MarketDataSettings = Field(default_factory=MarketDataSettings)
     screener: ScreenerSettings = Field(default_factory=ScreenerSettings)
     universe: UniverseSettings = Field(default_factory=UniverseSettings)
+    quant_engine: QuantEngineSettings = Field(default_factory=QuantEngineSettings)
 
 
 @lru_cache
